@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trafic TomTom — Tuiles (segments)</title>
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    .legend {
+      position: absolute;
+      bottom: 24px;
+      left: 24px;
+      background: rgba(255,255,255,0.95);
+      padding: 12px 16px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      font-size: 13px;
+      z-index: 1;
+    }
+    .legend h3 { margin: 0 0 8px 0; font-size: 14px; color: #333; }
+    .legend-gradient {
+      height: 12px;
+      width: 180px;
+      border-radius: 4px;
+      margin-bottom: 6px;
+      background: linear-gradient(to right, #c0392b, #e67e22, #27ae60);
+    }
+    .legend-labels { display: flex; justify-content: space-between; color: #666; font-size: 11px; }
+    .loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(255,255,255,0.95);
+      padding: 24px 32px;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      z-index: 2;
+      font-size: 15px;
+    }
+    .loading.hidden { display: none; }
+    .error { color: #c0392b; margin-top: 8px; }
+    .meta { margin-top: 6px; color: #666; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="loading" class="loading">Chargement de flow-tiles-latest.json…</div>
+  <div class="legend" id="legend" style="display: none;">
+    <h3>Vitesse relative (0 = ralentissement, 1 = fluide)</h3>
+    <div class="legend-gradient"></div>
+    <div class="legend-labels">
+      <span>0</span>
+      <span>1</span>
+    </div>
+    <p class="meta" id="meta"></p>
+  </div>
+
+  <script>
+    const DATA_URL = 'tomtom/flow-tiles-latest.json';
+
+    function relativeSpeedToColor(relativeSpeed) {
+      if (relativeSpeed == null || isNaN(relativeSpeed)) return '#95a5a6';
+      const t = Math.max(0, Math.min(1, Number(relativeSpeed)));
+      const red = [0xc0, 0x39, 0x2b];
+      const orange = [0xe6, 0x7e, 0x22];
+      const green = [0x27, 0xae, 0x60];
+      let r, g, b;
+      if (t <= 0.5) {
+        const u = t / 0.5;
+        r = Math.round(red[0] + (orange[0] - red[0]) * u);
+        g = Math.round(red[1] + (orange[1] - red[1]) * u);
+        b = Math.round(red[2] + (orange[2] - red[2]) * u);
+      } else {
+        const u = (t - 0.5) / 0.5;
+        r = Math.round(orange[0] + (green[0] - orange[0]) * u);
+        g = Math.round(orange[1] + (green[1] - orange[1]) * u);
+        b = Math.round(orange[2] + (green[2] - orange[2]) * u);
+      }
+      return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
+    }
+
+    function prepareFeatures(data) {
+      const features = (data.features || []).map((f, i) => {
+        const rel = f.properties?.relative_speed;
+        const abs = f.properties?.absolute_speed;
+        const speed = rel != null ? rel : (abs != null ? Math.min(1, abs / 120) : null);
+        return {
+          ...f,
+          properties: {
+            ...f.properties,
+            color: relativeSpeedToColor(speed),
+          },
+        };
+      });
+      return {
+        type: 'FeatureCollection',
+        features,
+        bbox: data.bbox,
+        fetchedAt: data.fetchedAt,
+        segmentCount: data.segmentCount ?? features.length,
+      };
+    }
+
+    function initMap(geojson) {
+      const bbox = geojson.bbox;
+      const bounds = bbox
+        ? [[bbox.lonMin, bbox.latMin], [bbox.lonMax, bbox.latMax]]
+        : null;
+
+      const map = new maplibregl.Map({
+        container: 'map',
+        style: {
+          version: 8,
+          sources: {
+            osm: {
+              type: 'raster',
+              tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+              tileSize: 256,
+              attribution: '© OpenStreetMap',
+            },
+            flow: {
+              type: 'geojson',
+              data: { type: 'FeatureCollection', features: geojson.features },
+              lineMetrics: true,
+            },
+          },
+          layers: [
+            { id: 'osm', type: 'raster', source: 'osm', minzoom: 0, maxzoom: 19 },
+            {
+              id: 'flow-lines',
+              type: 'line',
+              source: 'flow',
+              paint: {
+                'line-color': ['get', 'color'],
+                'line-width': 3,
+                'line-opacity': 0.85,
+              },
+            },
+          ],
+        },
+        center: bbox
+          ? [(bbox.lonMin + bbox.lonMax) / 2, (bbox.latMin + bbox.latMax) / 2]
+          : [6.125, 46.175],
+        zoom: 11,
+      });
+
+      if (bounds) {
+        map.fitBounds(bounds, { padding: 40, maxZoom: 14 });
+      }
+
+      const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: false });
+      map.on('click', 'flow-lines', (e) => {
+        const p = e.features[0].properties;
+        let html = '';
+        if (p.relative_speed != null) html += '<strong>Vitesse relative : ' + Number(p.relative_speed).toFixed(2) + '</strong><br>';
+        if (p.absolute_speed != null) html += 'Vitesse : ' + p.absolute_speed + ' km/h<br>';
+        if (p.road_category) html += 'Catégorie : ' + p.road_category + '<br>';
+        if (p.road_closure) html += '<span style="color:#c0392b">Route fermée</span>';
+        popup.setLngLat(e.lngLat).setHTML(html || '—').addTo(map);
+      });
+      map.on('mouseenter', 'flow-lines', () => map.getCanvas().style.cursor = 'pointer');
+      map.on('mouseleave', 'flow-lines', () => map.getCanvas().style.cursor = '');
+
+      document.getElementById('legend').style.display = 'block';
+      const meta = document.getElementById('meta');
+      meta.textContent = geojson.fetchedAt
+        ? 'Données : ' + new Date(geojson.fetchedAt).toLocaleString('fr-CH') + ' — ' + (geojson.segmentCount ?? geojson.features.length) + ' segments'
+        : (geojson.segmentCount ?? geojson.features.length) + ' segments';
+      document.getElementById('loading').classList.add('hidden');
+    }
+
+    fetch(DATA_URL)
+      .then((r) => {
+        if (!r.ok) throw new Error(DATA_URL + ' introuvable. Lancez: npm run fetch:tomtom-tiles');
+        return r.json();
+      })
+      .then((data) => {
+        const geojson = prepareFeatures(data);
+        if (!geojson.features.length) throw new Error('Aucun segment dans le JSON.');
+        initMap(geojson);
+      })
+      .catch((err) => {
+        document.getElementById('loading').innerHTML = 'Erreur <span class="error">' + (err.message || err) + '</span>';
+      });
+  </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "name": "chtrafic",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fetch": "tsx src/fetch-traffic.ts",
+    "fetch:tomtom": "tsx src/fetch-tomtom.ts",
+    "fetch:tomtom-tiles": "tsx src/fetch-tomtom-tiles.ts",
+    "push:graphhopper": "tsx src/push-graphhopper.ts",
+    "refresh:monaco": "bash refresh-monaco.sh",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "@mapbox/vector-tile": "^2.0.4",
+    "dotenv": "^17.3.1",
+    "pbf": "^4.0.1"
+  }
+}

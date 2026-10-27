@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Compteurs de trafic – DATEX II</title>
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    .legend {
+      position: absolute;
+      bottom: 24px;
+      left: 24px;
+      background: rgba(255,255,255,0.95);
+      padding: 12px 16px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      font-size: 13px;
+      z-index: 1;
+    }
+    .legend h3 { margin: 0 0 8px 0; font-size: 14px; color: #333; }
+    .legend-gradient {
+      height: 12px;
+      width: 180px;
+      border-radius: 4px;
+      margin-bottom: 6px;
+      background: linear-gradient(to right, #c0392b, #e67e22, #27ae60);
+    }
+    .legend-labels { display: flex; justify-content: space-between; color: #666; font-size: 11px; }
+    .loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(255,255,255,0.95);
+      padding: 24px 32px;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      z-index: 2;
+      font-size: 15px;
+    }
+    .loading.hidden { display: none; }
+    .error { color: #c0392b; margin-top: 8px; }
+    .metric { margin-top: 4px; color: #666; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="loading" class="loading">Chargement des données…</div>
+  <div class="legend" id="legend" style="display: none;">
+    <h3>Vitesse moyenne (km/h)</h3>
+    <div class="legend-gradient"></div>
+    <div class="legend-labels">
+      <span>0 (congestion)</span>
+      <span>120 (fluide)</span>
+    </div>
+    <p class="metric">Couleur : vitesse moyenne par site. Positions : sites.xml (MST).</p>
+    <p class="metric" id="count" aria-live="polite"></p>
+  </div>
+
+  <script>
+    const NS = 'http://datex2.eu/schema/2/2_0';
+    const CH_BOUNDS = { lonMin: 5.96, lonMax: 10.49, latMin: 45.82, latMax: 47.81 };
+
+    function hash(str) {
+      let h = 0;
+      for (let i = 0; i < str.length; i++) {
+        const c = str.charCodeAt(i);
+        h = ((h << 5) - h) + c;
+        h = h & 0x7FFFFFFF;
+      }
+      return h;
+    }
+
+    function idToCoord(siteId) {
+      const h = hash(siteId);
+      const lon = CH_BOUNDS.lonMin + (h % 10000) / 10000 * (CH_BOUNDS.lonMax - CH_BOUNDS.lonMin);
+      const lat = CH_BOUNDS.latMin + ((h >> 10) % 10000) / 10000 * (CH_BOUNDS.latMax - CH_BOUNDS.latMin);
+      return [lon, lat];
+    }
+
+    /** Parse sites.xml (MST) et retourne une Map id -> [lon, lat]. */
+    function parseSitesTable(xmlText) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(xmlText, 'text/xml');
+      const coords = new Map();
+      const records = doc.getElementsByTagNameNS(NS, 'measurementSiteRecord');
+      for (let i = 0; i < records.length; i++) {
+        const rec = records[i];
+        const id = rec.getAttribute('id');
+        if (!id) continue;
+        const latEl = rec.getElementsByTagNameNS(NS, 'latitude')[0];
+        const lonEl = rec.getElementsByTagNameNS(NS, 'longitude')[0];
+        if (latEl && lonEl) {
+          const lat = parseFloat(latEl.textContent);
+          const lon = parseFloat(lonEl.textContent);
+          if (!isNaN(lat) && !isNaN(lon)) coords.set(id, [lon, lat]);
+        }
+      }
+      return coords;
+    }
+
+    function parseDatexResponse(xmlText, siteCoords) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(xmlText, 'text/xml');
+      const sites = new Map(); // id -> { speeds: [], flows: [] }
+
+      const siteMeasurements = doc.getElementsByTagNameNS(NS, 'siteMeasurements');
+      for (let i = 0; i < siteMeasurements.length; i++) {
+        const sm = siteMeasurements[i];
+        const ref = sm.getElementsByTagNameNS(NS, 'measurementSiteReference')[0];
+        if (!ref) continue;
+        const siteId = ref.getAttribute('id');
+        if (!siteId) continue;
+
+        if (!sites.has(siteId)) sites.set(siteId, { speeds: [], flows: [] });
+        const data = sites.get(siteId);
+
+        const values = sm.getElementsByTagNameNS(NS, 'measuredValue');
+        for (let j = 0; j < values.length; j++) {
+          const mv = values[j].getElementsByTagNameNS(NS, 'measuredValue')[0];
+          if (!mv) continue;
+          const basic = mv.getElementsByTagNameNS(NS, 'basicData')[0];
+          if (!basic) continue;
+          const basicType = (basic.getAttribute('xsi:type') || basic.getAttribute('type') || '').toLowerCase();
+
+          if (basicType.includes('trafficspeed')) {
+            const speedEl = basic.getElementsByTagNameNS(NS, 'speed')[0];
+            if (speedEl) {
+              const v = parseFloat(speedEl.textContent);
+              if (!isNaN(v)) data.speeds.push(v);
+            }
+          }
+          if (basicType.includes('trafficflow')) {
+            const flowEl = basic.getElementsByTagNameNS(NS, 'vehicleFlowRate')[0];
+            if (flowEl) {
+              const v = parseFloat(flowEl.textContent);
+              if (!isNaN(v)) data.flows.push(v);
+            }
+          }
+        }
+      }
+
+      const points = [];
+      let minSpeed = Infinity, maxSpeed = -Infinity;
+
+      sites.forEach((data, siteId) => {
+        const speeds = data.speeds.filter(s => s >= 0 && s <= 200);
+        const avgSpeed = speeds.length ? speeds.reduce((a, b) => a + b, 0) / speeds.length : null;
+        const avgFlow = data.flows.length
+          ? data.flows.reduce((a, b) => a + b, 0) / data.flows.length
+          : null;
+
+        let value = avgSpeed;
+        if (value == null && avgFlow != null) value = Math.min(120, avgFlow / 20);
+        if (value == null) value = 0;
+
+        if (value < minSpeed) minSpeed = value;
+        if (value > maxSpeed) maxSpeed = value;
+
+        const coord = siteCoords && siteCoords.has(siteId) ? siteCoords.get(siteId) : idToCoord(siteId);
+        const [lon, lat] = coord;
+        points.push({
+          type: 'Feature',
+          id: siteId,
+          properties: {
+            id: siteId,
+            speed: avgSpeed != null ? Math.round(avgSpeed * 10) / 10 : null,
+            flow: avgFlow != null ? Math.round(avgFlow) : null,
+            value: value
+          },
+          geometry: { type: 'Point', coordinates: [lon, lat] }
+        });
+      });
+
+      return {
+        type: 'FeatureCollection',
+        features: points,
+        stats: { minSpeed, maxSpeed }
+      };
+    }
+
+    function valueToColor(value, minV, maxV) {
+      if (minV >= maxV) return '#95a5a6';
+      const t = Math.max(0, Math.min(1, (value - minV) / (maxV - minV)));
+      const red = [0xc0, 0x39, 0x2b];
+      const orange = [0xe6, 0x7e, 0x22];
+      const green = [0x27, 0xae, 0x60];
+      let r, g, b;
+      if (t <= 0.5) {
+        const u = t / 0.5;
+        r = Math.round(red[0] + (orange[0] - red[0]) * u);
+        g = Math.round(red[1] + (orange[1] - red[1]) * u);
+        b = Math.round(red[2] + (orange[2] - red[2]) * u);
+      } else {
+        const u = (t - 0.5) / 0.5;
+        r = Math.round(orange[0] + (green[0] - orange[0]) * u);
+        g = Math.round(orange[1] + (green[1] - orange[1]) * u);
+        b = Math.round(orange[2] + (green[2] - orange[2]) * u);
+      }
+      return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
+    }
+
+    function initMap(geojson) {
+      const stats = geojson.stats;
+      const minV = stats.minSpeed === Infinity ? 0 : stats.minSpeed;
+      const maxV = stats.maxSpeed === -Infinity ? 120 : Math.max(stats.maxSpeed, 1);
+
+      const features = geojson.features.map(f => {
+        const v = f.properties.value;
+        return {
+          ...f,
+          properties: {
+            ...f.properties,
+            color: valueToColor(v, minV, maxV)
+          }
+        };
+      });
+
+      const map = new maplibregl.Map({
+        container: 'map',
+        style: {
+          version: 8,
+          sources: {
+            'osm': {
+              type: 'raster',
+              tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+              tileSize: 256,
+              attribution: '© OpenStreetMap'
+            },
+            'compteurs': {
+              type: 'geojson',
+              data: { type: 'FeatureCollection', features }
+            }
+          },
+          layers: [
+            { id: 'osm', type: 'raster', source: 'osm', minzoom: 0, maxzoom: 19 },
+            {
+              id: 'compteurs-cercle',
+              type: 'circle',
+              source: 'compteurs',
+              paint: {
+                'circle-radius': 8,
+                'circle-color': ['get', 'color'],
+                'circle-stroke-width': 1,
+                'circle-stroke-color': '#fff'
+              }
+            }
+          ]
+        },
+        center: [8.22, 46.82],
+        zoom: 7
+      });
+
+      const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: false });
+      map.on('click', 'compteurs-cercle', (e) => {
+        const p = e.features[0].properties;
+        let html = '<strong>' + p.id + '</strong>';
+        if (p.speed != null) html += '<br>Vitesse moy. : ' + p.speed + ' km/h';
+        if (p.flow != null) html += '<br>Débit : ' + p.flow + ' véh/h';
+        popup.setLngLat(e.lngLat).setHTML(html).addTo(map);
+      });
+      map.on('mouseenter', 'compteurs-cercle', () => map.getCanvas().style.cursor = 'pointer');
+      map.on('mouseleave', 'compteurs-cercle', () => map.getCanvas().style.cursor = '');
+
+      document.getElementById('legend').style.display = 'block';
+      document.getElementById('loading').classList.add('hidden');
+      const countEl = document.getElementById('count');
+      if (countEl) countEl.textContent = features.length + ' compteurs affichés';
+    }
+
+    Promise.all([
+      fetch('sites.xml').then(r => {
+        if (!r.ok) throw new Error('sites.xml introuvable (HTTP ' + r.status + ').');
+        return r.text();
+      }),
+      fetch('response.xml').then(r => {
+        if (!r.ok) throw new Error('response.xml introuvable (HTTP ' + r.status + '). Lancez la page depuis un serveur HTTP.');
+        return r.text();
+      })
+    ])
+      .then(([sitesXml, measuresXml]) => {
+        const siteCoords = parseSitesTable(sitesXml);
+        const geojson = parseDatexResponse(measuresXml, siteCoords);
+        if (!geojson.features.length) throw new Error('Aucun compteur trouvé dans response.xml.');
+        initMap(geojson);
+      })
+      .catch(err => {
+        document.getElementById('loading').innerHTML = 'Erreur <span class="error">' + (err.message || err) + '</span>';
+      });
+  </script>
+</body>
+</html>

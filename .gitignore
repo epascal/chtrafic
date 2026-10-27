@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+*.log
+logs/
+tomtom/
+.m2/
+genevois.osm.pbf
+response2.xml
+graphhopper-maps/
+graphhopper-traffic/
